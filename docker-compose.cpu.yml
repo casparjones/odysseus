@@ -1,18 +1,17 @@
-# Standalone AMD ROCm GPU Compose file — Coolify-kompatible Variante.
+# Standalone CPU-only Compose file — Coolify-kompatible Variante.
 #
-# Aenderung ggü. dem Original: Die fünf Volume-Bind-Mounts des odysseus-Service
-# verwenden KEINE Variable-mit-Suffix-Syntax mehr (z. B. ${APP_DATA_DIR}/ssh),
-# weil Coolifys Compose-Parser den Teil NACH der Variable verschluckt und so
-# eine kaputte Spec "host-pfad:" erzeugt → "invalid spec: ... empty section
-# between colons". Stattdessen feste relative Pfade unter ./data — Coolify
-# expandiert diese selbst zum Application-Verzeichnis.
-#
-# Falls du die Datenverzeichnisse woanders ablegen willst: passe die Pfade hier
-# direkt an (NICHT über ${APP_DATA_DIR} mit Suffix).
-#
-# Requires ROCm drivers on the host (kfd + DRI devices) and the host user
-# running Docker in the `video` and `render` groups. Set RENDER_GID to your
-# host's numeric render group id when needed. See docker/gpu.amd.yml for details.
+# Aenderungen ggü. der Repo-Datei:
+# 1) Volume-Bind-Mounts des odysseus-Service statisch (kein ${APP_DATA_DIR}/suffix),
+#    sonst scheitert Coolifys Parser mit "empty section between colons".
+# 2) Host-Port-Mappings (ports:) von searxng, chromadb und ntfy ENTFERNT.
+#    Diese Dienste werden ausschliesslich container-intern angesprochen
+#    (odysseus -> http://searxng:8080, chromadb:8000, ntfy:80 ueber das
+#    Docker-Netzwerk). Auf dem Coolify-Host belegt coolify-proxy (Traefik)
+#    bereits 0.0.0.0:8080, weshalb searxngs Host-Bind mit
+#    "port is already allocated" fehlschlaegt. Ohne Host-Mapping faellt die
+#    Kollision weg — und es ist sicherer (interne Dienste nicht exponiert).
+#    odysseus selbst behaelt sein Port-Mapping, damit der Coolify-Proxy es
+#    erreichen kann.
 services:
   odysseus:
     build: .
@@ -21,14 +20,12 @@ services:
     volumes:
       - ./data:/app/data:z
       - ./logs:/app/logs:z
-      # Cookbook remote-server SSH identity.
       - ./data/ssh:/app/.ssh:z
-      # Cookbook local model cache (HuggingFace).
       - ./data/huggingface:/app/.cache/huggingface:z
-      # Cookbook-installed Python CLIs/packages (vLLM, llama-cpp-python, etc.).
       - ./data/local:/app/.local:z
-      # Docker socket — lets Cookbook reach the host's Docker daemon.
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-963}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -71,8 +68,6 @@ services:
       - GOOGLE_PSE_CX=${GOOGLE_PSE_CX:-}
       - TAVILY_API_KEY=${TAVILY_API_KEY:-}
       - SERPER_API_KEY=${SERPER_API_KEY:-}
-      # PUID / PGID — der User/Gruppe, zu dem der Container vor uvicorn dropped.
-      # Find yours with:  id -u  /  id -g
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     depends_on:
@@ -81,19 +76,12 @@ services:
       chromadb:
         condition: service_started
     restart: unless-stopped
-    # AMD ROCm overlay (from docker/gpu.amd.yml).
-    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - "${DOCKER_GID:-963}"
-      - video
-      - ${RENDER_GID:-render}
 
   chromadb:
     image: docker.io/chromadb/chroma:latest
-    ports:
-      - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
+    # Kein Host-Port-Mapping: odysseus erreicht chromadb intern als chromadb:8000.
+    expose:
+      - "8000"
     volumes:
       - chromadb-data:/chroma/chroma
     environment:
@@ -117,8 +105,10 @@ services:
           sed "s|__SEARXNG_SECRET__|$$secret|g" /tmp/searxng-settings.yml.template > /etc/searxng/settings.yml
         fi
         exec /usr/local/searxng/entrypoint.sh
-    ports:
-      - "127.0.0.1:8080:8080"
+    # Kein Host-Port-Mapping: odysseus erreicht searxng intern als searxng:8080.
+    # Vermeidet Kollision mit coolify-proxy auf Host-Port 8080.
+    expose:
+      - "8080"
     volumes:
       - searxng-data:/etc/searxng
       - ./config/searxng/settings.yml:/tmp/searxng-settings.yml.template:ro,z
@@ -143,8 +133,9 @@ services:
   ntfy:
     image: docker.io/binwiederhier/ntfy
     command: serve
-    ports:
-      - "${NTFY_BIND:-127.0.0.1}:8091:80"
+    # Kein Host-Port-Mapping: nur container-intern relevant.
+    expose:
+      - "80"
     volumes:
       - ntfy-cache:/var/cache/ntfy
     environment:
